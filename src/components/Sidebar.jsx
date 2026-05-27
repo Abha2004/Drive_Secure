@@ -1,8 +1,8 @@
-import { useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import {
   FaHome,
   FaMapMarkedAlt,
+  FaShieldAlt,
   FaBell,
   FaChartBar,
   FaCog,
@@ -10,32 +10,33 @@ import {
   FaTimes
 } from "react-icons/fa";
 
-function Sidebar({ mobileOpen, setMobileOpen }) {
-  const location = useLocation();
+function Sidebar({ mobileOpen, setMobileOpen, activeTab, setActiveTab }) {
   const navigate = useNavigate();
 
   const handleLogout = () => {
+    localStorage.removeItem("ds_token");
+    localStorage.removeItem("ds_user");
+    localStorage.removeItem("ds_settings");
     navigate("/login");
   };
 
   const navItems = [
-    { name: "Dashboard", path: "/dashboard", icon: <FaHome /> },
-    { name: "Live Map", path: "#", icon: <FaMapMarkedAlt /> },
-    { name: "Alerts", path: "#", icon: <FaBell /> },
-    { name: "Analytics", path: "#", icon: <FaChartBar /> },
-    { name: "Settings", path: "#", icon: <FaCog /> },
+    { name: "Dashboard", id: "dashboard", icon: <FaHome /> },
+    { name: "Live Map", id: "map", icon: <FaMapMarkedAlt /> },
+    { name: "Risk Check", id: "predict", icon: <FaShieldAlt /> },
+    { name: "Alerts", id: "alerts", icon: <FaBell /> },
+    { name: "Analytics", id: "analytics", icon: <FaChartBar /> },
+    { name: "Settings", id: "settings", icon: <FaCog /> },
   ];
 
   return (
     <>
-      {/* Mobile Overlay */}
       {mobileOpen && (
         <div className="sidebar-overlay" onClick={() => setMobileOpen(false)} />
       )}
 
       <div className={`sidebar ${mobileOpen ? "open" : ""}`}>
         <div>
-          {/* Mobile Close Btn */}
           <div className="mobile-close" onClick={() => setMobileOpen(false)}>
             <FaTimes />
           </div>
@@ -52,8 +53,11 @@ function Sidebar({ mobileOpen, setMobileOpen }) {
             {navItems.map((item, index) => (
               <div
                 key={index}
-                className={`sidebar-link ${location.pathname === item.path ? "active-link" : ""}`}
-                onClick={() => setMobileOpen(false)}
+                className={`sidebar-link ${activeTab === item.id ? "active-link" : ""}`}
+                onClick={() => {
+                  setActiveTab(item.id);
+                  setMobileOpen(false);
+                }}
               >
                 {item.icon}
                 <span>{item.name}</span>
