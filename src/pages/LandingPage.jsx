@@ -64,7 +64,7 @@ function LandingPage() {
           </h1>
 
           <h2 className="hero-subtitle animate-fade-in-up delay-2">
-           Safety Towards Road Accidents 
+            Smart Accident Prediction Using AI
           </h2>
 
           <p className="hero-desc animate-fade-in-up delay-3">

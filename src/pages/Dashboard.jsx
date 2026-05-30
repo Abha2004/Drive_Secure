@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import L from "leaflet";
 import "../styles/dashboard.css";
 import Sidebar from "../components/Sidebar";
 import LocationForm from "../components/LocationForm";
@@ -31,50 +32,168 @@ import {
 import { io } from "socket.io-client";
 import { API_BASE_URL, SOCKET_URL } from "../config/env";
 
+// High-fidelity standard SVG map pins to prevent production 404 asset failures
+const createPinSvg = (color) => `
+  <div style="display: flex; justify-content: center; align-items: center; width: 36px; height: 36px;">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="36" height="36" style="filter: drop-shadow(0 3px 6px rgba(0,0,0,0.4)); cursor: pointer;">
+      <path fill="${color}" d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+    </svg>
+  </div>
+`;
+
+const liveLocationIcon = L.divIcon({
+  html: `
+    <div style="position: relative; width: 40px; height: 40px; display: flex; justify-content: center; align-items: center;">
+      <style>
+        @keyframes livePulse {
+          0% { transform: scale(0.85); opacity: 0.8; }
+          50% { transform: scale(1.25); opacity: 0.3; }
+          100% { transform: scale(0.85); opacity: 0.8; }
+        }
+      </style>
+      <!-- Glowing pulsating outer ring -->
+      <div style="
+        position: absolute;
+        width: 24px;
+        height: 24px;
+        background: rgba(59, 130, 246, 0.4);
+        border: 2px solid rgba(59, 130, 246, 0.8);
+        border-radius: 50%;
+        animation: livePulse 2s infinite ease-in-out;
+      "></div>
+      <!-- Solid inner blue dot -->
+      <div style="
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        background: #3b82f6;
+        border: 2px solid #ffffff;
+        border-radius: 50%;
+        box-shadow: 0 0 10px rgba(59, 130, 246, 0.8);
+      "></div>
+    </div>
+  `,
+  className: "custom-leaflet-marker-live",
+  iconSize: [40, 40],
+  iconAnchor: [20, 20],
+  popupAnchor: [0, -20]
+});
+
+const startIcon = L.divIcon({
+  html: createPinSvg("#10b981"), // Sleek Emerald Green pin for start point
+  className: "custom-leaflet-marker-start",
+  iconSize: [36, 36],
+  iconAnchor: [18, 36],
+  popupAnchor: [0, -36]
+});
+
+const destIcon = L.divIcon({
+  html: createPinSvg("#ef4444"), // Sleek Crimson Red pin for destination
+  className: "custom-leaflet-marker-dest",
+  iconSize: [36, 36],
+  iconAnchor: [18, 36],
+  popupAnchor: [0, -36]
+});
+
+const getHazardIcon = (riskLevel) => {
+  const color = riskLevel === 'high' ? '#ef4444' : riskLevel === 'medium' ? '#f59e0b' : '#3b82f6';
+  const emoji = riskLevel === 'high' ? '🚨' : riskLevel === 'medium' ? '⚠️' : '🔔';
+  
+  // Custom hazard pin: teardrop SVG with warning emoji in the center!
+  return L.divIcon({
+    html: `
+      <div style="display: flex; justify-content: center; align-items: center; width: 36px; height: 36px; position: relative;">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="36" height="36" style="filter: drop-shadow(0 3px 6px rgba(0,0,0,0.4)); cursor: pointer;">
+          <path fill="${color}" d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/>
+        </svg>
+        <span style="position: absolute; top: 6px; font-size: 13px; pointer-events: none;">${emoji}</span>
+      </div>
+    `,
+    className: `custom-leaflet-marker-hazard-${riskLevel}`,
+    iconSize: [36, 36],
+    iconAnchor: [18, 36],
+    popupAnchor: [0, -36]
+  });
+};
+
 // ========== DASHBOARD VIEW ==========
-function DashboardView({ user, alerts, alertStats, mapCenter, handleLocationTracked, userLocations, selectedLocation, handleSelectLocation }) {
+function DashboardView({ user, alerts, alertStats, mapCenter, handleLocationTracked, userLocations, selectedLocation, handleSelectLocation, locations = [], currentCity, hasLocation }) {
+  const currentLat = mapCenter?.[0] || 23.2599;
+  const currentLng = mapCenter?.[1] || 77.4126;
+
+  // Filter locations to only those matching the user's detected city (case-insensitive)
+  const cityLocations = hasLocation
+    ? locations.filter(l => l.city?.toLowerCase() === currentCity?.toLowerCase())
+    : [];
+
+  // Deduplicate user saved locations at the same spot to prevent redundant buttons
+  const uniqueUserLocations = [];
+  const seenCoords = new Set();
+  userLocations.forEach(loc => {
+    if (loc.latitude && loc.longitude) {
+      const latLngKey = `${parseFloat(loc.latitude).toFixed(4)},${parseFloat(loc.longitude).toFixed(4)}`;
+      if (!seenCoords.has(latLngKey)) {
+        seenCoords.add(latLngKey);
+        uniqueUserLocations.push(loc);
+      }
+    }
+  });
+
+  const safeRoutesCount = hasLocation ? (cityLocations.length + uniqueUserLocations.length) : 0;
+
   return (
     <>
-      <div style={{ marginBottom: "20px", display: "flex", gap: "12px", alignItems: "center" }}>
-        <label style={{ fontWeight: "600", color: "var(--text-muted)" }}>📍 Your Locations:</label>
-        {userLocations.length > 0 ? (
-          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-            {userLocations.map(loc => (
-              <button
-                key={loc._id}
-                onClick={() => handleSelectLocation(loc)}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: "20px",
-                  border: selectedLocation?._id === loc._id ? "2px solid var(--blue-400)" : "1px solid var(--border-subtle)",
-                  background: selectedLocation?._id === loc._id ? "var(--blue-400)" : "transparent",
-                  color: selectedLocation?._id === loc._id ? "white" : "var(--text-primary)",
-                  cursor: "pointer",
-                  fontSize: "14px",
-                  fontWeight: "500",
-                  transition: "all 0.2s"
-                }}
-              >
-                {loc.name}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p style={{ color: "var(--text-muted)", fontSize: "14px" }}>No saved locations yet</p>
-        )}
-      </div>
+
 
       <div className="stats-grid">
-        <div className="stat-card">
-          <div className="card-top">
-            <div className="icon-box purple"><FaShieldAlt /></div>
+        <div className="stat-card" style={{ position: 'relative' }}>
+          {/* Neon ambient glow for risk card */}
+          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: '120px', height: '120px', borderRadius: '50%', background: 'radial-gradient(circle, rgba(239,68,68,0.06) 0%, transparent 70%)', pointerEvents: 'none' }} />
+          <div className="card-top" style={{ gap: '20px' }}>
+            {/* Circular neon gauge */}
+            {(() => {
+              const riskScore = hasLocation ? Math.min(99, 40 + alertStats.high * 12) : 0;
+              const riskLabel = hasLocation ? (alertStats.high > 3 ? "High" : alertStats.high > 0 ? "Medium" : "Low") : "—";
+              const gaugeColor = alertStats.high > 3 ? '#ef4444' : alertStats.high > 0 ? '#f59e0b' : '#22c55e';
+              const glowColor = alertStats.high > 3 ? 'rgba(239,68,68,0.5)' : alertStats.high > 0 ? 'rgba(245,158,11,0.5)' : 'rgba(34,197,94,0.5)';
+              const circumference = 2 * Math.PI * 28;
+              const dashOffset = circumference - (riskScore / 100) * circumference;
+              return (
+                <div style={{ position: 'relative', width: '72px', height: '72px', flexShrink: 0 }}>
+                  <svg width="72" height="72" viewBox="0 0 72 72" style={{ transform: 'rotate(-90deg)' }}>
+                    <defs>
+                      <filter id="glow-gauge">
+                        <feGaussianBlur stdDeviation="2.5" result="blur" />
+                        <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+                      </filter>
+                    </defs>
+                    {/* Track */}
+                    <circle cx="36" cy="36" r="28" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="5" />
+                    {/* Glow ring */}
+                    <circle cx="36" cy="36" r="28" fill="none" stroke={glowColor} strokeWidth="5"
+                      strokeDasharray={circumference} strokeDashoffset={dashOffset}
+                      strokeLinecap="round" style={{ filter: `drop-shadow(0 0 6px ${gaugeColor})`, transition: 'stroke-dashoffset 1s ease, stroke 0.5s ease' }} />
+                    {/* Crisp ring */}
+                    <circle cx="36" cy="36" r="28" fill="none" stroke={gaugeColor} strokeWidth="3"
+                      strokeDasharray={circumference} strokeDashoffset={dashOffset}
+                      strokeLinecap="round" style={{ transition: 'stroke-dashoffset 1s ease, stroke 0.5s ease' }} />
+                  </svg>
+                  {/* Center label */}
+                  <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                    <span style={{ fontSize: '16px', fontWeight: '900', color: gaugeColor, lineHeight: 1, textShadow: `0 0 10px ${gaugeColor}` }}>{hasLocation ? `${riskScore}%` : '—'}</span>
+                  </div>
+                </div>
+              );
+            })()}
             <div>
               <p className="card-title">Overall Risk</p>
-              <h2 className="danger-text">{alertStats.high > 3 ? "High" : alertStats.high > 0 ? "Medium" : "Low"}</h2>
+              <h2 className={alertStats.high > 3 ? "danger-text" : "card-number"} style={{ fontSize: '22px' }}>
+                {hasLocation ? (alertStats.high > 3 ? "High" : alertStats.high > 0 ? "Medium" : "Low") : "—"}
+              </h2>
             </div>
           </div>
           <div className="card-bottom">
-            <p>Risk Score: {Math.min(99, 40 + alertStats.high * 12)}%</p>
+            <p>{hasLocation ? `Risk Score: ${Math.min(99, 40 + alertStats.high * 12)}%` : "Risk Score: —"}</p>
             <div className="mini-chart chart-red" />
           </div>
         </div>
@@ -84,7 +203,7 @@ function DashboardView({ user, alerts, alertStats, mapCenter, handleLocationTrac
             <div className="icon-box blue"><FaBell /></div>
             <div>
               <p className="card-title">Active Alerts</p>
-              <h2 className="card-number">{alertStats.total}</h2>
+              <h2 className="card-number">{hasLocation ? alertStats.total : 0}</h2>
             </div>
           </div>
           <div className="card-bottom">
@@ -98,11 +217,11 @@ function DashboardView({ user, alerts, alertStats, mapCenter, handleLocationTrac
             <div className="icon-box green"><FaShieldAlt /></div>
             <div>
               <p className="card-title">Safe Routes</p>
-              <h2 className="card-number">24</h2>
+              <h2 className="card-number">{hasLocation ? safeRoutesCount : 0}</h2>
             </div>
           </div>
           <div className="card-bottom">
-            <p>Recommended</p>
+            <p>{hasLocation ? `${currentCity} Area` : "Area: Not Set"}</p>
             <div className="mini-chart chart-green" />
           </div>
         </div>
@@ -112,7 +231,7 @@ function DashboardView({ user, alerts, alertStats, mapCenter, handleLocationTrac
             <div className="icon-box yellow"><FaExclamationTriangle /></div>
             <div>
               <p className="card-title">Accidents Today</p>
-              <h2 className="card-number">{alertStats.todayCount}</h2>
+              <h2 className="card-number">{hasLocation ? alertStats.todayCount : 0}</h2>
             </div>
           </div>
           <div className="card-bottom">
@@ -122,47 +241,125 @@ function DashboardView({ user, alerts, alertStats, mapCenter, handleLocationTrac
         </div>
       </div>
 
-      <div className="map-wrapper">
-        <div className="map-container">
+      <div className="dashboard-middle-row" style={{ display: "flex", gap: "20px", marginBottom: "24px", flexWrap: "wrap", alignItems: "stretch" }}>
+        <div style={{ flex: "1 1 460px", minWidth: "300px", display: "flex" }}>
+          <div style={{ flex: 1 }}>
+            <LocationForm onLocationTracked={handleLocationTracked} />
+        </div>
+        <div style={{
+          flex: "1 1 400px", minWidth: "300px",
+          background: "linear-gradient(135deg, rgba(8,14,32,0.95) 0%, rgba(5,9,22,0.98) 100%)",
+          border: "1px solid rgba(96,165,250,0.1)",
+          borderRadius: "20px", padding: "26px",
+          backdropFilter: "blur(24px)",
+          boxShadow: "0 8px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.04)",
+          display: "flex", flexDirection: "column", gap: "20px",
+          position: "relative", overflow: "hidden"
+        }}>
+          {/* Top edge glow */}
+          <div style={{ position:"absolute", top:0, left:0, right:0, height:"1px", background:"linear-gradient(90deg,transparent,rgba(239,68,68,0.4),transparent)" }} />
+          {/* Ambient bg glow */}
+          <div style={{ position:"absolute", top:"-30px", right:"-30px", width:"160px", height:"160px", borderRadius:"50%", background:"radial-gradient(circle, rgba(239,68,68,0.04) 0%, transparent 70%)", pointerEvents:"none" }} />
+
+          {/* Header */}
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:"13px" }}>
+              <div style={{
+                width:"42px", height:"42px", borderRadius:"12px", flexShrink:0,
+                background:"linear-gradient(135deg, rgba(239,68,68,0.2), rgba(220,38,38,0.1))",
+                border:"1px solid rgba(239,68,68,0.25)",
+                display:"flex", alignItems:"center", justifyContent:"center",
+                fontSize:"18px",
+                boxShadow:"0 0 20px rgba(239,68,68,0.12)"
+              }}>🚨</div>
+              <div>
+                <h3 style={{ margin:0, fontSize:"16px", fontWeight:"700", color:"white" }}>Live Alerts</h3>
+                <p style={{ margin:0, fontSize:"12px", color:"rgba(148,163,184,0.6)", marginTop:"2px" }}>Real-time hazard broadcast</p>
+              </div>
+            </div>
+            {/* Live pulse badge */}
+            <div style={{ display:"flex", alignItems:"center", gap:"7px", padding:"5px 12px", borderRadius:"999px", background:"rgba(239,68,68,0.07)", border:"1px solid rgba(239,68,68,0.18)" }}>
+              <span style={{ width:"7px", height:"7px", borderRadius:"50%", background:"#ef4444", display:"inline-block", boxShadow:"0 0 8px rgba(239,68,68,0.8)", animation:"liveDot 1.5s infinite" }} />
+              <span style={{ fontSize:"11px", fontWeight:"700", color:"#f87171", textTransform:"uppercase", letterSpacing:"0.5px" }}>{alerts.length} Active</span>
+            </div>
+          </div>
+
+          {/* Alert rows */}
+          <div style={{ display:"flex", flexDirection:"column", gap:"10px", flex:1 }}>
+            {alerts.slice(0, 4).map((a, i) => {
+              const isHigh = a.riskLevel === "high";
+              const isMed = a.riskLevel === "medium";
+              const color = isHigh ? "#ef4444" : isMed ? "#f59e0b" : "#60a5fa";
+              const bg = isHigh ? "rgba(239,68,68,0.05)" : isMed ? "rgba(245,158,11,0.05)" : "rgba(96,165,250,0.05)";
+              const borderC = isHigh ? "rgba(239,68,68,0.18)" : isMed ? "rgba(245,158,11,0.18)" : "rgba(96,165,250,0.18)";
+              const emoji = isHigh ? "🚨" : isMed ? "⚠️" : "🔔";
+              return (
+                <div key={i} style={{
+                  display:"flex", alignItems:"center", gap:"13px",
+                  padding:"13px 16px", borderRadius:"12px",
+                  background: bg, border:`1px solid ${borderC}`,
+                  borderLeft: `3px solid ${color}`,
+                  position:"relative", overflow:"hidden",
+                  transition:"transform 0.2s ease, box-shadow 0.2s ease"
+                }}
+                  onMouseEnter={e => { e.currentTarget.style.transform="translateX(3px)"; e.currentTarget.style.boxShadow=`0 0 20px ${color}18`; }}
+                  onMouseLeave={e => { e.currentTarget.style.transform="none"; e.currentTarget.style.boxShadow="none"; }}
+                >
+                  {/* Pulsing dot */}
+                  <div style={{ flexShrink:0, width:"8px", height:"8px", borderRadius:"50%", background:color, boxShadow:`0 0 8px ${color}` }} />
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <p style={{ margin:0, fontSize:"13px", fontWeight:"600", color:"rgba(255,255,255,0.9)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                      {emoji} {a.message}
+                    </p>
+                    <p style={{ margin:0, fontSize:"10px", color:color, fontWeight:"700", textTransform:"uppercase", letterSpacing:"0.5px", marginTop:"3px" }}>
+                      {a.riskLevel} risk
+                    </p>
+                  </div>
+                  <span style={{ fontSize:"11px", color:"rgba(148,163,184,0.4)", flexShrink:0, fontFamily:"'Courier New', monospace" }}>
+                    {a.createdAt ? new Date(a.createdAt).toLocaleTimeString("en-IN", { hour:"2-digit", minute:"2-digit" }) : "Live"}
+                  </span>
+                </div>
+              );
+            })}
+
+            {alerts.length === 0 && (
+              <div style={{
+                flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+                padding:"32px 20px", gap:"12px", textAlign:"center",
+                background:"rgba(34,197,94,0.03)", border:"1px dashed rgba(34,197,94,0.15)", borderRadius:"14px"
+              }}>
+                <span style={{ fontSize:"36px", filter:"drop-shadow(0 0 10px rgba(34,197,94,0.4))" }}>🟢</span>
+                <p style={{ margin:0, fontSize:"13px", color:"rgba(148,163,184,0.7)", lineHeight:1.5 }}>
+                  All clear — no active alerts<br/>
+                  <span style={{ fontSize:"11px", color:"rgba(148,163,184,0.4)" }}>Roads are safe in your area</span>
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+        </div>
+      </div>
+
+      <div className="map-wrapper" style={{ minHeight: "500px" }}>
+        <div className="map-container" style={{ flex: 1 }}>
           <div className="live-badge">
             <span /> Live Tracking Active
           </div>
           <MapContainer center={mapCenter} zoom={12} style={{ height: "100%", width: "100%", zIndex: 1 }}>
             <MapUpdater center={mapCenter} />
             <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" />
-            <Marker position={mapCenter}>
-              <Popup>📍 Your Live Location</Popup>
-            </Marker>
-            {alerts.slice(0, 10).map((a, i) => (
-              <Marker key={i} position={[a.location?.latitude || 23.26, a.location?.longitude || 77.41]}>
+            {hasLocation && (
+              <Marker position={mapCenter} icon={liveLocationIcon}>
+                <Popup>📍 Your Live Location</Popup>
+              </Marker>
+            )}
+            {hasLocation && alerts.slice(0, 10).map((a, i) => (
+              <Marker key={i} position={[a.location?.latitude || 23.26, a.location?.longitude || 77.41]} icon={getHazardIcon(a.riskLevel)}>
                 <Popup>{a.message} ({a.riskLevel})</Popup>
               </Marker>
             ))}
           </MapContainer>
         </div>
-
-        <div className="right-panel">
-          <div className="panel-card risk-panel">
-            <h3 className="risk-title">Current Route Risk</h3>
-            <h1 className="risk-score">{Math.min(99, 40 + alertStats.high * 12)}%</h1>
-            <p className="risk-desc">Based on {alertStats.total} active alerts in your area.</p>
-            <button className="btn-risk">View Safer Routes</button>
-          </div>
-
-          <div className="panel-card alerts-panel">
-            <h3>Live Alerts</h3>
-            {alerts.slice(0, 4).map((a, i) => (
-              <div key={i} className={`alert-item ${a.riskLevel === 'high' ? 'alert-danger' : a.riskLevel === 'medium' ? 'alert-warning' : 'alert-info'}`}>
-                {a.riskLevel === 'high' ? '🚨' : a.riskLevel === 'medium' ? '🚗' : '🔔'} {a.message}
-              </div>
-            ))}
-            {alerts.length === 0 && <div className="alert-item alert-neutral">✅ No active alerts</div>}
-          </div>
-        </div>
-      </div>
-
-      <div style={{ marginTop: "24px" }}>
-        <LocationForm onLocationTracked={handleLocationTracked} />
       </div>
     </>
   );
@@ -272,7 +469,7 @@ function CustomSelect({ value, onChange, placeholder, options, groupedOptions })
 }
 
 // ========== LIVE MAP VIEW ==========
-function LiveMapView({ settings, mapCenter, locations }) {
+function LiveMapView({ settings, mapCenter, locations, currentCity }) {
   const [from, setFrom] = useState(null);
   const [to, setTo] = useState(null);
   const [age, setAge] = useState("18-30");
@@ -281,6 +478,45 @@ function LiveMapView({ settings, mapCenter, locations }) {
   const [showAlt, setShowAlt] = useState(false);
   const [loading, setLoading] = useState(false);
   const [localMapCenter, setLocalMapCenter] = useState(mapCenter);
+  const [manualFrom, setManualFrom] = useState(false);
+  const [manualTo, setManualTo] = useState(false);
+  const [fromNameInput, setFromNameInput] = useState("");
+  const [toNameInput, setToNameInput] = useState("");
+  const [geocodingFrom, setGeocodingFrom] = useState(false);
+  const [geocodingTo, setGeocodingTo] = useState(false);
+
+  const handleManualGeocode = async (type) => {
+    const query = type === "from" ? fromNameInput : toNameInput;
+    if (!query || query.trim().length < 3) return;
+    
+    if (type === "from") setGeocodingFrom(true);
+    else setGeocodingTo(true);
+    
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&countrycodes=in`);
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const item = data[0];
+        const newPt = {
+          name: item.display_name.split(',')[0],
+          lat: parseFloat(item.lat),
+          lng: parseFloat(item.lon)
+        };
+        if (type === "from") {
+          setFrom(newPt);
+          setLocalMapCenter([newPt.lat, newPt.lng]);
+        } else {
+          setTo(newPt);
+          setLocalMapCenter([newPt.lat, newPt.lng]);
+        }
+      }
+    } catch (err) {
+      console.error("Manual geocoding failed:", err);
+    } finally {
+      if (type === "from") setGeocodingFrom(false);
+      else setGeocodingTo(false);
+    }
+  };
 
   // Search queries and suggestions
   const [fromQuery, setFromQuery] = useState("");
@@ -289,6 +525,57 @@ function LiveMapView({ settings, mapCenter, locations }) {
   const [toSuggestions, setToSuggestions] = useState([]);
   const [activeSearch, setActiveSearch] = useState(null); // 'from' or 'to'
   const selectRef = useRef(null);
+  const [recommendedLocs, setRecommendedLocs] = useState([]);
+
+  // Dynamically load/fetch recommended landmarks for the current city
+  useEffect(() => {
+    const loadLandmarks = async () => {
+      if (!currentCity) {
+        setRecommendedLocs([]);
+        return;
+      }
+      
+      // 1. Filter local database matches
+      const dbMatches = locations.filter(
+        l => l.city?.toLowerCase() === currentCity.toLowerCase()
+      );
+      
+      if (dbMatches.length > 0) {
+        // Use our high-fidelity database landmarks
+        setRecommendedLocs(dbMatches.map(l => ({ name: l.name, lat: l.lat, lng: l.lng })));
+      } else {
+        // 2. City not in Bhopal/Jabalpur database -> Dynamic geocoded landmarks using Nominatim
+        try {
+          const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=landmark,park,hospital,mall+in+${encodeURIComponent(currentCity)}&limit=10&countrycodes=in`);
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            const mapped = data.map(item => ({
+              name: item.display_name.split(',')[0],
+              lat: parseFloat(item.lat),
+              lng: parseFloat(item.lon)
+            }));
+            setRecommendedLocs(mapped);
+          } else {
+            // General center fallback
+            const fallbackRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(currentCity)}+center&limit=5&countrycodes=in`);
+            const fallbackData = await fallbackRes.json();
+            const mapped = fallbackData.map(item => ({
+              name: item.display_name.split(',')[0],
+              lat: parseFloat(item.lat),
+              lng: parseFloat(item.lon)
+            }));
+            setRecommendedLocs(mapped);
+          }
+        } catch (err) {
+          console.error("Failed to dynamically geocode recommended landmarks:", err);
+          // Absolute fallback: Show all from DB
+          setRecommendedLocs(locations.map(l => ({ name: `${l.name} (${l.city})`, lat: l.lat, lng: l.lng })));
+        }
+      }
+    };
+    
+    loadLandmarks();
+  }, [currentCity, locations]);
 
   // Close suggestions on outside click
   useEffect(() => {
@@ -319,29 +606,12 @@ function LiveMapView({ settings, mapCenter, locations }) {
       });
       const data = await res.json();
       setRouteData(data);
-      setShowAlt(false);
+      setShowAlt(true);
     } catch (err) {
       console.error(err);
     } finally {
       setLoading(false);
     }
-  };
-
-  // Determine closest city to position to sort default recommendations
-  const currentLat = localMapCenter?.[0] || 23.2599;
-  const currentLng = localMapCenter?.[1] || 77.4126;
-  const bhopalDist = Math.pow(currentLat - 23.2599, 2) + Math.pow(currentLng - 77.4126, 2);
-  const jabalpurDist = Math.pow(currentLat - 23.1647, 2) + Math.pow(currentLng - 79.9511, 2);
-  const isJabalpurCloser = jabalpurDist < bhopalDist;
-
-  // Build default suggestions list
-  const getRecommendedLocations = () => {
-    const bhopalList = locations.filter(l => l.city === "Bhopal").map(l => ({ name: `${l.name} (Bhopal)`, lat: l.lat, lng: l.lng }));
-    const jabalpurList = locations.filter(l => l.city === "Jabalpur").map(l => ({ name: `${l.name} (Jabalpur)`, lat: l.lat, lng: l.lng }));
-    if (isJabalpurCloser) {
-      return [...jabalpurList, ...bhopalList];
-    }
-    return [...bhopalList, ...jabalpurList];
   };
 
   // Nominatim dynamic search
@@ -461,7 +731,7 @@ function LiveMapView({ settings, mapCenter, locations }) {
     const isOpen = activeSearch === type;
     let list = suggestions;
     if (query.trim().length < 3) {
-      list = getRecommendedLocations().slice(0, 8);
+      list = recommendedLocs.slice(0, 8);
     }
 
     return (
@@ -546,19 +816,159 @@ function LiveMapView({ settings, mapCenter, locations }) {
 
         <div className="route-planner-grid">
           <div className="premium-input-card">
-            <div className="input-header">
+            <div className="input-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", marginBottom: "8px" }}>
               <span className="input-label">Starting Point</span>
-              <span className="input-icon">📍</span>
+              <span style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <button
+                  onClick={() => {
+                    setManualFrom(!manualFrom);
+                    if (!manualFrom) {
+                      setFromNameInput(from ? from.name : "");
+                    }
+                  }}
+                  style={{
+                    background: "rgba(96, 165, 250, 0.08)",
+                    border: "1px solid rgba(96, 165, 250, 0.2)",
+                    borderRadius: "4px",
+                    padding: "3px 8px",
+                    color: "#93c5fd",
+                    fontSize: "10px",
+                    cursor: "pointer",
+                    fontWeight: "600",
+                    transition: "all 0.2s ease"
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background="rgba(96,165,250,0.18)"}
+                  onMouseLeave={e => e.currentTarget.style.background="rgba(96,165,250,0.08)"}
+                >
+                  {manualFrom ? "🔎 Search Suggestions" : "✍️ Custom Name"}
+                </button>
+                <span className="input-icon">📍</span>
+              </span>
             </div>
-            {renderSearchField("from", from, fromQuery, fromSuggestions, "Search or click map...", handleQueryChange)}
+            {manualFrom ? (
+              <div style={{ display: "flex", gap: "8px", width: "100%", position: "relative" }}>
+                <input
+                  type="text"
+                  placeholder="Type starting place name..."
+                  value={fromNameInput}
+                  onChange={(e) => setFromNameInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleManualGeocode("from");
+                  }}
+                  className="auth-input"
+                  style={{
+                    flex: 1,
+                    height: "44px",
+                    borderRadius: "8px",
+                    border: "1px solid var(--border-subtle)",
+                    background: "rgba(255,255,255,0.02)",
+                    color: "white",
+                    padding: "0 54px 0 12px",
+                    fontSize: "13px"
+                  }}
+                />
+                <button
+                  onClick={() => handleManualGeocode("from")}
+                  disabled={geocodingFrom}
+                  style={{
+                    position: "absolute",
+                    right: "6px",
+                    top: "6px",
+                    height: "32px",
+                    background: "var(--blue-500)",
+                    border: "none",
+                    borderRadius: "6px",
+                    color: "white",
+                    padding: "0 10px",
+                    fontSize: "11px",
+                    cursor: "pointer",
+                    fontWeight: "600"
+                  }}
+                >
+                  {geocodingFrom ? "⏳" : "🔍 Find"}
+                </button>
+              </div>
+            ) : (
+              renderSearchField("from", from, fromQuery, fromSuggestions, "Search or click map...", handleQueryChange)
+            )}
           </div>
 
           <div className="premium-input-card">
-            <div className="input-header">
+            <div className="input-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", marginBottom: "8px" }}>
               <span className="input-label">Destination</span>
-              <span className="input-icon">🏁</span>
+              <span style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <button
+                  onClick={() => {
+                    setManualTo(!manualTo);
+                    if (!manualTo) {
+                      setToNameInput(to ? to.name : "");
+                    }
+                  }}
+                  style={{
+                    background: "rgba(96, 165, 250, 0.08)",
+                    border: "1px solid rgba(96, 165, 250, 0.2)",
+                    borderRadius: "4px",
+                    padding: "3px 8px",
+                    color: "#93c5fd",
+                    fontSize: "10px",
+                    cursor: "pointer",
+                    fontWeight: "600",
+                    transition: "all 0.2s ease"
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background="rgba(96,165,250,0.18)"}
+                  onMouseLeave={e => e.currentTarget.style.background="rgba(96,165,250,0.08)"}
+                >
+                  {manualTo ? "🔎 Search Suggestions" : "✍️ Custom Name"}
+                </button>
+                <span className="input-icon">🏁</span>
+              </span>
             </div>
-            {renderSearchField("to", to, toQuery, toSuggestions, "Search or click map...", handleQueryChange)}
+            {manualTo ? (
+              <div style={{ display: "flex", gap: "8px", width: "100%", position: "relative" }}>
+                <input
+                  type="text"
+                  placeholder="Type destination place name..."
+                  value={toNameInput}
+                  onChange={(e) => setToNameInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleManualGeocode("to");
+                  }}
+                  className="auth-input"
+                  style={{
+                    flex: 1,
+                    height: "44px",
+                    borderRadius: "8px",
+                    border: "1px solid var(--border-subtle)",
+                    background: "rgba(255,255,255,0.02)",
+                    color: "white",
+                    padding: "0 54px 0 12px",
+                    fontSize: "13px"
+                  }}
+                />
+                <button
+                  onClick={() => handleManualGeocode("to")}
+                  disabled={geocodingTo}
+                  style={{
+                    position: "absolute",
+                    right: "6px",
+                    top: "6px",
+                    height: "32px",
+                    background: "var(--blue-500)",
+                    border: "none",
+                    borderRadius: "6px",
+                    color: "white",
+                    padding: "0 10px",
+                    fontSize: "11px",
+                    cursor: "pointer",
+                    fontWeight: "600"
+                  }}
+                >
+                  {geocodingTo ? "⏳" : "🔍 Find"}
+                </button>
+              </div>
+            ) : (
+              renderSearchField("to", to, toQuery, toSuggestions, "Search or click map...", handleQueryChange)
+            )}
           </div>
 
           <div className="premium-input-card">
@@ -646,7 +1056,7 @@ function LiveMapView({ settings, mapCenter, locations }) {
             </div>
 
             {/* Alternate Route Promo */}
-            {routeData.mainRoute.riskScore > 50 && (
+            {routeData.alternativeRoute && (
               <div className="alt-route-cta-container">
                 <div className="alt-route-text">
                   <span>🛡️</span>
@@ -670,19 +1080,104 @@ function LiveMapView({ settings, mapCenter, locations }) {
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" />
           <MapClickHandler onMapClick={handleMapClick} />
           {from && (
-            <Marker position={[from.lat, from.lng]}>
+            <Marker position={[from.lat, from.lng]} icon={startIcon}>
               <Popup>🟢 Starting Point: {from.name}</Popup>
             </Marker>
           )}
           {to && (
-            <Marker position={[to.lat, to.lng]}>
+            <Marker position={[to.lat, to.lng]} icon={destIcon}>
               <Popup>🔴 Destination: {to.name}</Popup>
             </Marker>
           )}
           {routeData && (
             <>
-              <Polyline positions={routeData.mainRoute.path} pathOptions={{ color: routeData.mainRoute.color, weight: 5 }} />
-              {showAlt && <Polyline positions={routeData.alternativeRoute.path} pathOptions={{ color: "#22c55e", weight: 5, dashArray: "10 10" }} />}
+              {/* Main route — shadow glow layer + crisp line */}
+              <Polyline
+                positions={routeData.mainRoute.path}
+                pathOptions={{ color: routeData.mainRoute.color, weight: 10, opacity: 0.18 }}
+              />
+              <Polyline
+                positions={routeData.mainRoute.path}
+                pathOptions={{ color: routeData.mainRoute.color, weight: 5, opacity: 0.95, lineCap: "round", lineJoin: "round" }}
+              >
+                <Popup>
+                  <div style={{
+                    padding: "8px 12px",
+                    background: "#080c18",
+                    color: "white",
+                    borderRadius: "10px",
+                    border: `1px solid ${routeData.mainRoute.color}40`,
+                    boxShadow: `0 4px 20px ${routeData.mainRoute.color}15`,
+                    minWidth: "180px",
+                    fontFamily: "Inter, sans-serif"
+                  }}>
+                    <strong style={{ display: "flex", alignItems: "center", gap: "6px", color: routeData.mainRoute.color, fontSize: "13px" }}>
+                      🚨 Direct Main Route
+                    </strong>
+                    <div style={{ margin: "6px 0", height: "1px", background: "rgba(255,255,255,0.06)" }} />
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
+                      <span style={{ color: "rgba(255,255,255,0.5)" }}>Accident Risk:</span>
+                      <strong style={{ color: routeData.mainRoute.color }}>{routeData.mainRoute.riskScore}%</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
+                      <span style={{ color: "rgba(255,255,255,0.5)" }}>Risk Level:</span>
+                      <strong style={{ color: routeData.mainRoute.color }}>{routeData.mainRoute.riskLevel}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px" }}>
+                      <span style={{ color: "rgba(255,255,255,0.5)" }}>Hazards Near Path:</span>
+                      <strong style={{ color: routeData.mainRoute.hazardsDetectedCount > 0 ? "#f87171" : "#4ade80" }}>
+                        {routeData.mainRoute.hazardsDetectedCount || 0}
+                      </strong>
+                    </div>
+                  </div>
+                </Popup>
+              </Polyline>
+
+              {/* Alt safe route — solid bold green with glow */}
+              {showAlt && routeData.alternativeRoute?.path?.length > 0 && (
+                <>
+                  <Polyline
+                    positions={routeData.alternativeRoute.path}
+                    pathOptions={{ color: "#22c55e", weight: 12, opacity: 0.15 }}
+                  />
+                  <Polyline
+                    positions={routeData.alternativeRoute.path}
+                    pathOptions={{ color: "#22c55e", weight: 5, opacity: 1, lineCap: "round", lineJoin: "round" }}
+                  >
+                    <Popup>
+                      <div style={{
+                        padding: "8px 12px",
+                        background: "#080c18",
+                        color: "white",
+                        borderRadius: "10px",
+                        border: "1px solid rgba(34, 197, 94, 0.4)",
+                        boxShadow: "0 4px 20px rgba(34, 197, 94, 0.15)",
+                        minWidth: "180px",
+                        fontFamily: "Inter, sans-serif"
+                      }}>
+                        <strong style={{ display: "flex", alignItems: "center", gap: "6px", color: "#22c55e", fontSize: "13px" }}>
+                          🛡️ Safer Detour Path
+                        </strong>
+                        <div style={{ margin: "6px 0", height: "1px", background: "rgba(255,255,255,0.06)" }} />
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
+                          <span style={{ color: "rgba(255,255,255,0.5)" }}>Accident Risk:</span>
+                          <strong style={{ color: "#22c55e" }}>{routeData.alternativeRoute.riskScore}%</strong>
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
+                          <span style={{ color: "rgba(255,255,255,0.5)" }}>Risk Level:</span>
+                          <strong style={{ color: "#22c55e" }}>{routeData.alternativeRoute.riskLevel}</strong>
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px" }}>
+                          <span style={{ color: "rgba(255,255,255,0.5)" }}>Hazards Avoided:</span>
+                          <strong style={{ color: "#4ade80" }}>
+                            {Math.max(0, (routeData.mainRoute.hazardsDetectedCount || 0) - (routeData.alternativeRoute.hazardsDetectedCount || 0))}
+                          </strong>
+                        </div>
+                      </div>
+                    </Popup>
+                  </Polyline>
+                </>
+              )}
             </>
           )}
         </MapContainer>
@@ -692,7 +1187,7 @@ function LiveMapView({ settings, mapCenter, locations }) {
 }
 
 // ========== ALERTS VIEW ==========
-function AlertsView({ alerts, socket, locations }) {
+function AlertsView({ alerts, socket, locations, currentCity }) {
   const [msg, setMsg] = useState("");
   const [locationName, setLocationName] = useState("");
   const [risk, setRisk] = useState("medium");
@@ -706,16 +1201,16 @@ function AlertsView({ alerts, socket, locations }) {
     { id: "construction", label: "Construction", icon: <FaHardHat />, color: "var(--text-muted)" },
   ];
 
-  const locationGroupedOptions = [
-    {
-      label: "🏙️ Bhopal",
-      items: locations.filter(l => l.city === 'Bhopal').map(l => ({ value: l.name, label: l.name }))
-    },
-    {
-      label: "🌆 Jabalpur",
-      items: locations.filter(l => l.city === 'Jabalpur').map(l => ({ value: l.name, label: l.name }))
-    }
-  ].filter(g => g.items.length > 0);
+  // Filter locations to only user's detected city
+  const activeCityLocations = locations.filter(
+    l => l.city?.toLowerCase() === currentCity?.toLowerCase()
+  );
+  // If city match returns results, use those; else show all as fallback
+  const alertLocList = activeCityLocations.length > 0 ? activeCityLocations : locations;
+  const locationGroupedOptions = [{
+    label: `📍 ${currentCity || 'All Locations'}`,
+    items: alertLocList.map(l => ({ value: l.name, label: l.name }))
+  }];
 
   const riskLevels = [
     { id: "low", label: "Low Risk", color: "#22c55e", bg: "rgba(34, 197, 94, 0.08)", icon: "🟢" },
@@ -859,7 +1354,7 @@ function AlertsView({ alerts, socket, locations }) {
       <div className="panel-card alerts-panel" style={{ flex: "1.4", minWidth: "360px", display: "flex", flexDirection: "column", gap: "16px" }}>
         <div>
           <h3 style={{ marginBottom: "4px" }}>📋 Live Broadcast Alert Feed</h3>
-          <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>Active, crowdsourced road hazard notifications in Jabalpur and Bhopal ({alerts.length})</p>
+          <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>Active, crowdsourced road hazard notifications across all areas ({alerts.length})</p>
         </div>
 
         <div className="alerts-scroll" style={{ display: "flex", flexDirection: "column", gap: "12px", maxHeight: "460px", overflowY: "auto", paddingRight: "4px" }}>
@@ -1317,9 +1812,7 @@ function RiskCheckView({ locations }) {
   }));
 
   const rfConf  = result ? result.random_forest?.confidence_score * 100  : 0;
-  const lrConf  = result ? result.logistic_regression?.confidence_score * 100 : 0;
   const rfLevel = result?.random_forest?.risk_level;
-  const lrLevel = result?.logistic_regression?.risk_level;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -1394,7 +1887,7 @@ function RiskCheckView({ locations }) {
         <div className="panel-card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div>
             <h3 style={{ marginBottom: '4px' }}>📊 Risk Analysis Output</h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: 0 }}>AI model comparison with confidence scores</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: 0 }}>AI model severity prediction</p>
           </div>
 
           {result ? (
@@ -1402,8 +1895,7 @@ function RiskCheckView({ locations }) {
               {/* Risk Bar Graph */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                 {[
-                  { label: '🌲 Random Forest', level: rfLevel, conf: rfConf, color: getRiskColor(rfLevel), accent: 'var(--blue-400)' },
-                  { label: '📈 Logistic Regression', level: lrLevel, conf: lrConf, color: getRiskColor(lrLevel), accent: '#a855f7' },
+                  { label: '🌲 Random Forest Model', level: rfLevel, conf: rfConf, color: getRiskColor(rfLevel), accent: 'var(--blue-400)' },
                 ].map(({ label, level, conf, color, accent }) => (
                   <div key={label} style={{
                     padding: '14px 16px', borderRadius: '12px',
@@ -1433,9 +1925,9 @@ function RiskCheckView({ locations }) {
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Risk Level Gauge</div>
                 <svg viewBox="0 0 300 80" style={{ width: '100%' }}>
                   {[
-                    { label: 'Slight', val: rfLevel === 'Slight Injury' ? rfConf : (lrLevel === 'Slight Injury' ? lrConf : 30), color: '#22c55e' },
-                    { label: 'Serious', val: rfLevel === 'Serious Injury' ? rfConf : (lrLevel === 'Serious Injury' ? lrConf : 20), color: '#f59e0b' },
-                    { label: 'Fatal', val: rfLevel === 'Fatal injury' ? rfConf : (lrLevel === 'Fatal injury' ? lrConf : 10), color: '#ef4444' },
+                    { label: 'Slight', val: rfLevel === 'Slight Injury' ? rfConf : 30, color: '#22c55e' },
+                    { label: 'Serious', val: rfLevel === 'Serious Injury' ? rfConf : 20, color: '#f59e0b' },
+                    { label: 'Fatal', val: rfLevel === 'Fatal injury' ? rfConf : 10, color: '#ef4444' },
                   ].map((d, i) => {
                     const bw = (d.val / 100) * 160;
                     const y = 8 + i * 24;
@@ -1481,8 +1973,7 @@ function RiskCheckView({ locations }) {
                 <th style={{ padding: '10px 8px' }}>Vehicle</th>
                 <th style={{ padding: '10px 8px' }}>Weather / Road</th>
                 <th style={{ padding: '10px 8px' }}>Area</th>
-                <th style={{ padding: '10px 8px' }}>RF Result</th>
-                <th style={{ padding: '10px 8px' }}>LR Result</th>
+                <th style={{ padding: '10px 8px' }}>Accident Severity (Random Forest)</th>
               </tr>
             </thead>
             <tbody>
@@ -1502,14 +1993,10 @@ function RiskCheckView({ locations }) {
                     <span style={{ color: getRiskColor(h.random_forest?.risk_level), fontWeight: 700 }}>{h.random_forest?.risk_level}</span>
                     <span style={{ color: 'var(--text-muted)', marginLeft: '4px', fontSize: '11px' }}>({(h.random_forest?.confidence_score * 100).toFixed(0)}%)</span>
                   </td>
-                  <td style={{ padding: '10px 8px' }}>
-                    <span style={{ color: getRiskColor(h.logistic_regression?.risk_level), fontWeight: 700 }}>{h.logistic_regression?.risk_level}</span>
-                    <span style={{ color: 'var(--text-muted)', marginLeft: '4px', fontSize: '11px' }}>({(h.logistic_regression?.confidence_score * 100).toFixed(0)}%)</span>
-                  </td>
                 </tr>
               ))}
               {history.length === 0 && (
-                <tr><td colSpan="6" style={{ textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)' }}>No predictions yet. Make your first prediction above!</td></tr>
+                <tr><td colSpan="5" style={{ textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)' }}>No predictions yet. Make your first prediction above!</td></tr>
               )}
             </tbody>
           </table>
@@ -1534,6 +2021,8 @@ function Dashboard() {
   const [userLocations, setUserLocations] = useState([]);
   const [selectedLocation, setSelectedLocation] = useState(null);
   const [globalLocations, setGlobalLocations] = useState([]);
+  const [currentCity, setCurrentCity] = useState("");
+  const [hasLocation, setHasLocation] = useState(false);
   const [settings, setSettings] = useState(() => {
     try { return JSON.parse(localStorage.getItem("ds_settings")) || {}; } catch { return {}; }
   });
@@ -1555,12 +2044,14 @@ function Dashboard() {
   // Callback when location is tracked
   const handleLocationTracked = (latitude, longitude) => {
     setMapCenter([latitude, longitude]);
+    setHasLocation(true);
   };
 
   // Handle location selection from dropdown
   const handleSelectLocation = (location) => {
     setSelectedLocation(location);
     setMapCenter([location.latitude, location.longitude]);
+    setHasLocation(true);
   };
 
   // Fill defaults
@@ -1587,6 +2078,62 @@ function Dashboard() {
     try { setUser(JSON.parse(userData)); } catch { navigate("/login"); }
   }, [navigate]);
 
+  // Dynamic reverse-geocoding of map center to active city name
+  // Only fires when user has actually set a location
+  useEffect(() => {
+    if (!mapCenter || !hasLocation) return;
+    const reverseGeocode = async () => {
+      try {
+        const [lat, lng] = mapCenter;
+        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=10`);
+        const data = await res.json();
+
+        // Get all unique city names from DB locations
+        const dbCities = [...new Set(globalLocations.map(l => l.city).filter(Boolean))];
+
+        if (data && data.address) {
+          // Try multiple address fields for city name
+          const candidates = [
+            data.address.city,
+            data.address.town,
+            data.address.suburb,
+            data.address.village,
+            data.address.state_district,
+            data.address.county,
+          ].filter(Boolean);
+
+          // Try to match any candidate against a DB city (case-insensitive, partial match)
+          let matchedCity = null;
+          for (const candidate of candidates) {
+            const found = dbCities.find(
+              dbCity => candidate.toLowerCase().includes(dbCity.toLowerCase()) || dbCity.toLowerCase().includes(candidate.toLowerCase())
+            );
+            if (found) { matchedCity = found; break; }
+          }
+
+          if (matchedCity) {
+            setCurrentCity(matchedCity);
+          } else if (candidates.length > 0) {
+            // Use raw Nominatim value if no DB match (for future cities)
+            setCurrentCity(candidates[0]);
+          }
+        } else {
+          // Distance fallback using DB city coords
+          const bhopalDist = Math.pow(lat - 23.2599, 2) + Math.pow(lng - 77.4126, 2);
+          const jabalpurDist = Math.pow(lat - 23.1647, 2) + Math.pow(lng - 79.9511, 2);
+          setCurrentCity(jabalpurDist < bhopalDist ? "Jabalpur" : "Bhopal");
+        }
+      } catch (err) {
+        console.error("Reverse geocoding failed, using distance fallback:", err);
+        const [lat, lng] = mapCenter;
+        const bhopalDist = Math.pow(lat - 23.2599, 2) + Math.pow(lng - 77.4126, 2);
+        const jabalpurDist = Math.pow(lat - 23.1647, 2) + Math.pow(lng - 79.9511, 2);
+        setCurrentCity(jabalpurDist < bhopalDist ? "Jabalpur" : "Bhopal");
+      }
+    };
+    reverseGeocode();
+  }, [mapCenter, hasLocation, globalLocations]);
+
   // Fetch user's latest location
   useEffect(() => {
     const fetchUserLocation = async () => {
@@ -1599,7 +2146,6 @@ function Dashboard() {
         });
         const data = await res.json();
         if (data.location) {
-          setMapCenter([data.location.latitude, data.location.longitude]);
           setSelectedLocation(data.location);
         }
         
@@ -1651,6 +2197,13 @@ function Dashboard() {
 
   if (!user) return null;
 
+  // Dynamic city and coordinates calculation from reverse-geocoded active map focus
+  const currentLat = mapCenter?.[0] || 23.2599;
+  const currentLng = mapCenter?.[1] || 77.4126;
+  const locationLabel = hasLocation 
+    ? `${currentCity} (${currentLat.toFixed(4)}, ${currentLng.toFixed(4)})` 
+    : "Location Not Set";
+
   const tabTitles = {
     dashboard: "Welcome Back 👋",
     map: "Live Map 🗺️",
@@ -1658,6 +2211,7 @@ function Dashboard() {
     alerts: "Alert Center 🚨",
     analytics: "Analytics 📊",
     settings: "Settings ⚙️",
+    profile: "User Profile 👤"
   };
 
   return (
@@ -1678,18 +2232,264 @@ function Dashboard() {
             </div>
           </div>
 
-          <div className="topbar-right">
+          <div className="topbar-right" style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div className="weather-badge" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              📍 {locationLabel}
+            </div>
             <div className="weather-badge">{settings.weather === "Rainy" ? "🌧️" : settings.weather === "Cloudy" ? "☁️" : "☀️"} {settings.weather || "Normal"}</div>
-            <div className="profile-avatar" title={user.name} />
+            <div 
+              className="profile-avatar" 
+              title={user.name} 
+              onClick={() => setActiveTab("profile")}
+              style={user.profilePhoto ? { backgroundImage: `url(${user.profilePhoto})`, backgroundSize: "cover", backgroundPosition: "center" } : {}}
+            />
           </div>
         </div>
 
-        {activeTab === "dashboard" && <DashboardView user={user} alerts={alerts} alertStats={alertStats} mapCenter={mapCenter} handleLocationTracked={handleLocationTracked} userLocations={userLocations} selectedLocation={selectedLocation} handleSelectLocation={handleSelectLocation} />}
-        {activeTab === "map" && <LiveMapView settings={settings} mapCenter={mapCenter} locations={globalLocations} />}
+        {activeTab === "dashboard" && <DashboardView user={user} alerts={alerts} alertStats={alertStats} mapCenter={mapCenter} handleLocationTracked={handleLocationTracked} userLocations={userLocations} selectedLocation={selectedLocation} handleSelectLocation={handleSelectLocation} locations={globalLocations} currentCity={currentCity} hasLocation={hasLocation} />}
+        {activeTab === "map" && <LiveMapView settings={settings} mapCenter={mapCenter} locations={globalLocations} currentCity={currentCity} />}
         {activeTab === "predict" && <RiskCheckView locations={globalLocations} />}
-        {activeTab === "alerts" && <AlertsView alerts={alerts} socket={socket} locations={globalLocations} />}
+        {activeTab === "alerts" && <AlertsView alerts={alerts} socket={socket} locations={globalLocations} currentCity={currentCity} />}
         {activeTab === "analytics" && <AnalyticsView alertStats={alertStats} />}
         {activeTab === "settings" && <SettingsView settings={settings} setSettings={setSettings} user={user} />}
+        {activeTab === "profile" && <ProfileView user={user} setUser={setUser} />}
+      </div>
+    </div>
+  );
+}
+
+// ========== USER PROFILE VIEW ==========
+function ProfileView({ user, setUser }) {
+  const [name, setName] = useState(user.name || "");
+  const [email, setEmail] = useState(user.email || "");
+  const [phone, setPhone] = useState(user.phone || "");
+  const [profilePhoto, setProfilePhoto] = useState(user.profilePhoto || "");
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [messageType, setMessageType] = useState("");
+
+  const presetAvatars = [
+    "https://api.dicebear.com/7.x/bottts/svg?seed=Felix",
+    "https://api.dicebear.com/7.x/avataaars/svg?seed=Aneka",
+    "https://api.dicebear.com/7.x/avataaars/svg?seed=Jude",
+    "https://api.dicebear.com/7.x/avataaars/svg?seed=Garrett",
+    "https://api.dicebear.com/7.x/avataaars/svg?seed=Liza",
+    "https://api.dicebear.com/7.x/bottts/svg?seed=Starlight"
+  ];
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      if (file.size > 2 * 1024 * 1024) {
+        setMessage("⚠️ Photo size should be less than 2MB.");
+        setMessageType("error");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setProfilePhoto(reader.result);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleSave = async (e) => {
+    e.preventDefault();
+    if (!name.trim() || !email.trim()) {
+      setMessage("⚠️ Name and Email are required fields.");
+      setMessageType("error");
+      return;
+    }
+
+    setLoading(true);
+    setMessage("");
+
+    try {
+      const token = localStorage.getItem("ds_token");
+      const res = await fetch(`${API_BASE_URL}/user/profile`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ name, email, phone, profilePhoto })
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to update profile");
+
+      setMessage("✨ Profile updated successfully!");
+      setMessageType("success");
+      
+      // Update local storage and global state
+      const updatedUser = { ...user, name, email, phone, profilePhoto };
+      localStorage.setItem("ds_user", JSON.stringify(updatedUser));
+      setUser(updatedUser);
+    } catch (err) {
+      console.error(err);
+      setMessage(`❌ Error: ${err.message}`);
+      setMessageType("error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: "700px", margin: "0 auto", display: "flex", flexDirection: "column", gap: "24px" }} className="profile-view-wrapper">
+      <div className="panel-card" style={{ padding: "30px", position: "relative" }}>
+        
+        {/* Profile Card Header */}
+        <div style={{ display: "flex", alignItems: "center", gap: "24px", marginBottom: "30px", flexWrap: "wrap" }}>
+          <div 
+            style={{ 
+              width: "100px", 
+              height: "100px", 
+              borderRadius: "50%", 
+              backgroundImage: profilePhoto ? `url(${profilePhoto})` : "linear-gradient(135deg, var(--blue-500) 0%, var(--purple) 100%)",
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+              display: "flex", 
+              alignItems: "center", 
+              justifyContent: "center", 
+              fontSize: "36px", 
+              fontWeight: "bold",
+              border: "3px solid rgba(255,255,255,0.08)",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.3)"
+            }}
+          >
+            {!profilePhoto && (name ? name[0].toUpperCase() : "U")}
+          </div>
+          <div>
+            <h2 style={{ margin: "0 0 6px 0", fontSize: "22px", fontWeight: "700" }}>{name || "Your Profile"}</h2>
+            <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "14px" }}>Manage your personal credentials and road avatar.</p>
+          </div>
+        </div>
+
+        {/* Profile Form */}
+        <form onSubmit={handleSave} style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+          
+          {/* Avatar Presets */}
+          <div>
+            <label className="settings-label" style={{ marginBottom: "10px" }}>Select Avatar Preset</label>
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              {presetAvatars.map((av, idx) => (
+                <div 
+                  key={idx}
+                  onClick={() => setProfilePhoto(av)}
+                  style={{
+                    width: "50px",
+                    height: "50px",
+                    borderRadius: "50%",
+                    backgroundImage: `url(${av})`,
+                    backgroundSize: "cover",
+                    cursor: "pointer",
+                    border: profilePhoto === av ? "3px solid var(--blue-400)" : "2px solid transparent",
+                    transform: profilePhoto === av ? "scale(1.1)" : "none",
+                    transition: "all 0.2s ease",
+                    backgroundColor: "rgba(255,255,255,0.05)"
+                  }}
+                />
+              ))}
+              <div 
+                onClick={() => setProfilePhoto("")}
+                style={{
+                  width: "50px",
+                  height: "50px",
+                  borderRadius: "50%",
+                  background: "linear-gradient(135deg, var(--blue-500) 0%, var(--purple) 100%)",
+                  cursor: "pointer",
+                  border: profilePhoto === "" ? "3px solid var(--blue-400)" : "2px solid transparent",
+                  transform: profilePhoto === "" ? "scale(1.1)" : "none",
+                  transition: "all 0.2s ease",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "12px",
+                  fontWeight: "bold",
+                  color: "white"
+                }}
+              >
+                Reset
+              </div>
+            </div>
+          </div>
+
+          {/* File Picker Custom Photo */}
+          <div>
+            <label className="settings-label">Or Upload Custom Photo</label>
+            <input 
+              type="file" 
+              accept="image/*" 
+              onChange={handleFileUpload} 
+              style={{
+                color: "var(--text-muted)",
+                fontSize: "13px"
+              }}
+            />
+          </div>
+
+          <hr style={{ border: "none", borderTop: "1px solid var(--border-subtle)", margin: "10px 0" }} />
+
+          {/* Form Fields */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+            <div>
+              <label className="settings-label">Full Name</label>
+              <input 
+                type="text" 
+                className="auth-input" 
+                value={name} 
+                onChange={e => setName(e.target.value)} 
+                required 
+              />
+            </div>
+            <div>
+              <label className="settings-label">Email ID</label>
+              <input 
+                type="email" 
+                className="auth-input" 
+                value={email} 
+                onChange={e => setEmail(e.target.value)} 
+                required 
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="settings-label">Phone Number</label>
+            <input 
+              type="tel" 
+              className="auth-input" 
+              placeholder="Enter phone number..." 
+              value={phone} 
+              onChange={e => setPhone(e.target.value)} 
+            />
+          </div>
+
+          {message && (
+            <div 
+              style={{
+                padding: "12px",
+                borderRadius: "8px",
+                fontSize: "14px",
+                backgroundColor: messageType === "success" ? "rgba(34, 197, 94, 0.1)" : "rgba(239, 68, 68, 0.1)",
+                color: messageType === "success" ? "#22c55e" : "#ef4444",
+                border: `1px solid ${messageType === "success" ? "#22c55e" : "#ef4444"}`,
+                marginTop: "10px"
+              }}
+            >
+              {message}
+            </div>
+          )}
+
+          <button 
+            type="submit" 
+            className="route-calc-btn" 
+            disabled={loading}
+            style={{ width: "100%", height: "46px", marginTop: "10px" }}
+          >
+            {loading ? "Saving Profile..." : "⚡ Save Profile Changes"}
+          </button>
+        </form>
       </div>
     </div>
   );
