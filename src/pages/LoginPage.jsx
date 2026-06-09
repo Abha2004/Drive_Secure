@@ -12,6 +12,7 @@ function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [remember, setRemember] = useState(false);
+  const hasLoggedOut = localStorage.getItem("ds_has_logged_out") === "true";
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -50,7 +51,7 @@ function LoginPage() {
             <span style={{ color: "var(--blue-500)" }}>D</span>rive
             <span style={{ color: "var(--blue-500)" }}>S</span>ecure
           </div>
-          <h2 className="auth-title">Welcome Back</h2>
+          <h2 className="auth-title">{hasLoggedOut ? "Welcome Back" : "Welcome"}</h2>
           <p className="auth-subtitle">Sign in to your account to continue</p>
 
           {error && <div className="auth-error">⚠️ {error}</div>}

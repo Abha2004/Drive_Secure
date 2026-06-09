@@ -17,6 +17,7 @@ function Sidebar({ mobileOpen, setMobileOpen, activeTab, setActiveTab }) {
     localStorage.removeItem("ds_token");
     localStorage.removeItem("ds_user");
     localStorage.removeItem("ds_settings");
+    localStorage.setItem("ds_has_logged_out", "true");
     navigate("/login");
   };
 

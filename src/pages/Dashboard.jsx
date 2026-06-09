@@ -19,6 +19,7 @@ import {
   FaUser,
   FaSun,
   FaRoad,
+  FaTrash,
 } from "react-icons/fa";
 import {
   MapContainer,
@@ -1697,6 +1698,8 @@ function RiskCheckView({ locations }) {
   const [error, setError] = useState('');
   const [autoParams, setAutoParams] = useState(null);
   const [history, setHistory] = useState([]);
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -1706,6 +1709,30 @@ function RiskCheckView({ locations }) {
       if (Array.isArray(data)) setHistory(data);
     } catch {}
   }, []);
+
+  const confirmDelete = (id) => {
+    setDeleteConfirmId(id);
+  };
+
+  const executeDelete = async () => {
+    if (!deleteConfirmId) return;
+    setIsDeleting(true);
+    try {
+      const token = localStorage.getItem('ds_token');
+      const res = await fetch(`${API_BASE_URL}/predict/history/${deleteConfirmId}`, { 
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` } 
+      });
+      if (res.ok) {
+        setHistory(prev => prev.filter(h => h._id !== deleteConfirmId));
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsDeleting(false);
+      setDeleteConfirmId(null);
+    }
+  };
 
   useEffect(() => { fetchHistory(); }, [fetchHistory]);
 
@@ -1974,6 +2001,7 @@ function RiskCheckView({ locations }) {
                 <th style={{ padding: '10px 8px' }}>Weather / Road</th>
                 <th style={{ padding: '10px 8px' }}>Area</th>
                 <th style={{ padding: '10px 8px' }}>Accident Severity (Random Forest)</th>
+                <th style={{ padding: '10px 8px', textAlign: 'center' }}>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -1993,15 +2021,111 @@ function RiskCheckView({ locations }) {
                     <span style={{ color: getRiskColor(h.random_forest?.risk_level), fontWeight: 700 }}>{h.random_forest?.risk_level}</span>
                     <span style={{ color: 'var(--text-muted)', marginLeft: '4px', fontSize: '11px' }}>({(h.random_forest?.confidence_score * 100).toFixed(0)}%)</span>
                   </td>
+                  <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                    <button 
+                      onClick={() => confirmDelete(h._id)}
+                      style={{ 
+                        background: 'transparent', 
+                        border: 'none', 
+                        color: '#ef4444', 
+                        cursor: 'pointer',
+                        padding: '6px',
+                        borderRadius: '4px',
+                        transition: 'background 0.2s'
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                      title="Delete Prediction"
+                    >
+                      <FaTrash />
+                    </button>
+                  </td>
                 </tr>
               ))}
               {history.length === 0 && (
-                <tr><td colSpan="5" style={{ textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)' }}>No predictions yet. Make your first prediction above!</td></tr>
+                <tr><td colSpan="6" style={{ textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)' }}>No predictions yet. Make your first prediction above!</td></tr>
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* ── DELETE CONFIRMATION MODAL ── */}
+      {deleteConfirmId && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.7)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999
+        }}>
+          <div className="panel-card" style={{
+            width: '90%',
+            maxWidth: '400px',
+            background: 'var(--bg-secondary)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            padding: '24px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '16px',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.5)',
+            animation: 'fadeIn 0.2s ease-out'
+          }}>
+            <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#ef4444', margin: 0 }}>
+              <FaExclamationTriangle /> Delete Prediction
+            </h3>
+            <p style={{ color: 'var(--text-muted)', fontSize: '14px', margin: 0, lineHeight: 1.5 }}>
+              Are you sure you want to delete this prediction from your history? This action cannot be undone.
+            </p>
+            <div style={{ display: 'flex', gap: '12px', marginTop: '8px', justifyContent: 'flex-end' }}>
+              <button 
+                onClick={() => setDeleteConfirmId(null)}
+                disabled={isDeleting}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: '8px',
+                  background: 'transparent',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  color: 'white',
+                  cursor: isDeleting ? 'not-allowed' : 'pointer',
+                  fontWeight: 600,
+                  fontSize: '13px',
+                  transition: 'background 0.2s'
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={executeDelete}
+                disabled={isDeleting}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: '8px',
+                  background: '#ef4444',
+                  border: 'none',
+                  color: 'white',
+                  cursor: isDeleting ? 'not-allowed' : 'pointer',
+                  fontWeight: 600,
+                  fontSize: '13px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'background 0.2s'
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = '#dc2626'}
+                onMouseLeave={e => e.currentTarget.style.background = '#ef4444'}
+              >
+                {isDeleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
